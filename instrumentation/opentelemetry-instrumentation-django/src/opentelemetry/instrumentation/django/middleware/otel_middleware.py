@@ -438,11 +438,12 @@ class _DjangoMiddleware(MiddlewareMixin):
                 target = duration_attrs.get(SpanAttributes.HTTP_TARGET)
                 if target:
                     duration_attrs_old[SpanAttributes.HTTP_TARGET] = target
-                trace_api.set_span_in_context(span)
-                with trace_api.use_span(span):
-                    self._duration_histogram_old.record(
-                        max(round(duration_s * 1000), 0), duration_attrs_old
-                    )
+                # trace_api.set_span_in_context(span)
+                # with trace_api.use_span(span):
+                _logger.exception("Recording duration in old histogram")
+                self._duration_histogram_old.record(
+                    max(round(duration_s * 1000), 0), duration_attrs_old
+                )
             if self._duration_histogram_new:
                 duration_attrs_new = _parse_duration_attrs(
                     duration_attrs, _StabilityMode.HTTP
