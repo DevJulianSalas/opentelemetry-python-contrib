@@ -147,8 +147,16 @@ from psycopg2.extensions import (
     cursor as pg_cursor,  # pylint: disable=no-name-in-module
 )
 from psycopg2.sql import Composed  # pylint: disable=no-name-in-module
-
+from opentelemetry.semconv.trace import SpanAttributes
 from opentelemetry.instrumentation import dbapi
+from opentelemetry.metrics import get_meter
+from opentelemetry.instrumentation._semconv import (
+    _get_schema_url,
+    _OpenTelemetrySemanticConventionStability,
+    _OpenTelemetryStabilitySignalType,
+    HTTP_DURATION_HISTOGRAM_BUCKETS_NEW
+)
+from opentelemetry.semconv.metrics.db_metrics import DB_CLIENT_OPERATION_DURATION
 from opentelemetry.instrumentation.instrumentor import BaseInstrumentor
 from opentelemetry.instrumentation.psycopg2.package import (
     _instruments_any,
@@ -156,9 +164,12 @@ from opentelemetry.instrumentation.psycopg2.package import (
     _instruments_psycopg2_binary,
 )
 from opentelemetry.instrumentation.psycopg2.version import __version__
+from timeit import default_timer
+
 
 _logger = logging.getLogger(__name__)
 _OTEL_CURSOR_FACTORY_KEY = "_otel_orig_cursor_factory"
+CursorT = typing.TypeVar("CursorT")
 
 
 class Psycopg2Instrumentor(BaseInstrumentor):
@@ -170,6 +181,7 @@ class Psycopg2Instrumentor(BaseInstrumentor):
     }
 
     _DATABASE_SYSTEM = "postgresql"
+    _duration_histogram_db_operation = None
 
     def instrumentation_dependencies(self) -> Collection[str]:
         # Determine which package of psycopg2 is installed
@@ -196,6 +208,7 @@ class Psycopg2Instrumentor(BaseInstrumentor):
         tracer_provider = kwargs.get("tracer_provider")
         enable_sqlcommenter = kwargs.get("enable_commenter", False)
         commenter_options = kwargs.get("commenter_options", {})
+        meter_provider = kwargs.get("meter_provider")
         enable_attribute_commenter = kwargs.get(
             "enable_attribute_commenter", False
         )
@@ -211,6 +224,22 @@ class Psycopg2Instrumentor(BaseInstrumentor):
             enable_commenter=enable_sqlcommenter,
             commenter_options=commenter_options,
             enable_attribute_commenter=enable_attribute_commenter,
+        )
+        _OpenTelemetrySemanticConventionStability._initialize()
+        sem_conv_opt_in_mode = _OpenTelemetrySemanticConventionStability._get_opentelemetry_stability_opt_in_mode(
+            _OpenTelemetryStabilitySignalType.DATABASE,
+        )
+        meter = get_meter(
+            __name__,
+            __version__,
+            meter_provider=meter_provider,
+            schema_url=_get_schema_url(sem_conv_opt_in_mode),
+        )
+
+        Psycopg2Instrumentor._duration_histogram_db_operation = meter.create_histogram(
+            DB_CLIENT_OPERATION_DURATION,
+            unit="s",
+            description="Duration of database client operations",
         )
 
     def _uninstrument(self, **kwargs):
@@ -278,7 +307,6 @@ class DatabaseApiIntegration(dbapi.DatabaseApiIntegration):
         self.get_connection_attributes(connection)
         return connection
 
-
 class CursorTracer(dbapi.CursorTracer):
     def get_operation_name(self, cursor, args):
         if not args:
@@ -302,6 +330,28 @@ class CursorTracer(dbapi.CursorTracer):
         if isinstance(statement, Composed):
             statement = statement.as_string(cursor)
         return statement
+
+    def traced_execution(
+        self,
+        cursor: CursorT,
+        query_method: typing.Callable[..., typing.Any],
+        *args: tuple[typing.Any, ...],
+        **kwargs: dict[typing.Any, typing.Any],
+    ):
+        start = default_timer()
+        try:
+            return super().traced_execution(cursor, query_method, *args, **kwargs)
+        finally:
+            dur = max(default_timer() - start, 0.0)
+            hist = Psycopg2Instrumentor._duration_histogram_db_operation
+            if hist is not None:
+                attrs = {
+                    SpanAttributes.DB_SYSTEM: self._db_api_integration.database_system,
+                    SpanAttributes.DB_NAME:  self._db_api_integration.database,
+                    'frankfurt': True
+                }
+                hist.record(dur, attrs)
+
 
 
 def _new_cursor_factory(db_api=None, base_factory=None, tracer_provider=None):
