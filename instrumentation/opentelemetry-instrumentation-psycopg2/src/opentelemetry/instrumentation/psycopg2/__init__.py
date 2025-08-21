@@ -139,6 +139,7 @@ API
 
 import logging
 import typing
+import copy
 from importlib.metadata import PackageNotFoundError, distribution
 from typing import Collection
 
@@ -182,6 +183,8 @@ class Psycopg2Instrumentor(BaseInstrumentor):
 
     _DATABASE_SYSTEM = "postgresql"
     _duration_histogram_db_operation = None
+    _error_execution_statements_count = None
+    _execution_statements_count = None
 
     def instrumentation_dependencies(self) -> Collection[str]:
         # Determine which package of psycopg2 is installed
@@ -241,7 +244,17 @@ class Psycopg2Instrumentor(BaseInstrumentor):
             unit="s",
             description="Duration of database client operations",
         )
-
+        Psycopg2Instrumentor._error_execution_statements_count = meter.create_counter(
+            "db.client.error.execution.statements.count",
+            unit="by",
+            description="Error execution statements count for database client operations",
+        )
+        Psycopg2Instrumentor._execution_statements_count = meter.create_counter(
+            "db.client.execution.statements.count",
+            unit="by",
+            description="Execution statements count for database client operations",
+        )
+        
     def _uninstrument(self, **kwargs):
         """ "Disable Psycopg2 instrumentation"""
         dbapi.unwrap_connect(psycopg2, "connect")
@@ -339,18 +352,30 @@ class CursorTracer(dbapi.CursorTracer):
         **kwargs: dict[typing.Any, typing.Any],
     ):
         start = default_timer()
+        attrs = {
+            SpanAttributes.DB_SYSTEM: self._db_api_integration.database_system,
+            SpanAttributes.DB_NAME:  self._db_api_integration.database,
+        }
         try:
             return super().traced_execution(cursor, query_method, *args, **kwargs)
+        except Exception as e:
+            counter_err = Psycopg2Instrumentor.error_execution_statements_count
+            if counter_err is not None:
+                attr_error = copy.deepcopy(attrs)
+                attr_error[SpanAttributes.EXCEPTION_TYPE] = type(e).__name__
+                attr_error[SpanAttributes.EXCEPTION_MESSAGE] = str(e)
+                counter_err.add(1, attr_error)
         finally:
             dur = max(default_timer() - start, 0.0)
             hist = Psycopg2Instrumentor._duration_histogram_db_operation
+            counter_exec = Psycopg2Instrumentor._execution_statements_count
+            if counter_exec is not None:
+                counter_exec.add(1, attrs)
             if hist is not None:
-                attrs = {
-                    SpanAttributes.DB_SYSTEM: self._db_api_integration.database_system,
-                    SpanAttributes.DB_NAME:  self._db_api_integration.database,
-                    'frankfurt': True
-                }
-                hist.record(dur, attrs)
+                attr_histogram = copy.deepcopy(attrs)
+                statement = self.get_statement(cursor, args)
+                attr_histogram[SpanAttributes.DB_STATEMENT] = statement
+                hist.record(dur, attr_histogram)
 
 
 
