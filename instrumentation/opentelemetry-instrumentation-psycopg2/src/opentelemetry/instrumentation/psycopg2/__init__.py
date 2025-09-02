@@ -255,6 +255,8 @@ class Psycopg2Instrumentor(BaseInstrumentor):
             unit="by",
             description="Execution statements count for database client operations",
         )
+
+        _logger.info("Instrumented Psycopg2")
         
     def _uninstrument(self, **kwargs):
         """ "Disable Psycopg2 instrumentation"""
