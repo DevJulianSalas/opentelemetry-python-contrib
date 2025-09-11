@@ -377,6 +377,7 @@ class CursorTracer(dbapi.CursorTracer):
             if hist is not None:
                 attr_histogram = copy.deepcopy(attrs)
                 statement = self.get_statement(cursor, args)
+                print(statement)
                 attr_histogram[SpanAttributes.DB_STATEMENT] = statement
                 hist.record(dur, attr_histogram)
 
